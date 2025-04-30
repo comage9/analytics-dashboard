@@ -1,0 +1,100 @@
+/* App container and controls */
+.app-container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+  background: #fff;
+  border-radius: 8px;
+}
+.control-panel {
+  margin-bottom: 20px;
+  display: flex;
+  align-items: center;
+}
+.control-panel label {
+  margin-right: 10px;
+}
+
+/* Chart container */
+.chart-container {
+  margin: 20px 0;
+}
+
+h1 {
+  text-align: center;
+  margin-bottom: 10px;
+}
+
+h2 {
+  margin-bottom: 10px;
+}
+
+.comp-label {
+  font-weight: bold;
+  margin-right: 8px;
+  background: #eee;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+/* Global round font */
+body, input, button {
+  font-family: 'Nanum Gothic', sans-serif;
+}
+
+/* Modern tab navigation */
+.page-nav {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.page-nav button {
+  padding: 8px 16px;
+  border-radius: 9999px;
+  background: #e0e7ff;
+  border: none;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.page-nav button:disabled {
+  background: #6366f1;
+  color: white;
+  cursor: default;
+}
+
+/* Chat window */
+.chat-window {
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  padding: 12px;
+  max-height: 200px;
+  overflow-y: auto;
+  background: #f9fafb;
+}
+.chat-message.user {
+  text-align: right;
+  margin: 4px 0;
+}
+.chat-message.assistant {
+  text-align: left;
+  margin: 4px 0;
+}
+.chat-input {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.chat-input input {
+  flex: 1;
+  padding: 8px;
+  border-radius: 9999px;
+  border: 1px solid #ccc;
+}
+.chat-input button {
+  padding: 8px 16px;
+  border-radius: 9999px;
+  background: #6366f1;
+  color: white;
+  border: none;
+  cursor: pointer;
+}
