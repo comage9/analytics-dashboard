@@ -63,9 +63,17 @@ const App: React.FC = () => {
 
   // fetch available Ollama models
   useEffect(() => {
-    axios.get('/api/models')
-      .then(res => { setModels(res.data); if(res.data.length) setSelectedModel(res.data[0]); })
-      .catch(err => console.error(err))
+    // When refreshKey changes, trigger manual data reload on server
+    axios.post('/api/refresh-data')
+      .then(() => {
+        // After server-side refresh, re-fetch available models
+        return axios.get('/api/models')
+      })
+      .then(res => {
+        setModels(res.data);
+        if (res.data.length) setSelectedModel(res.data[0]);
+      })
+      .catch(err => console.error('Refresh error:', err));
   }, [refreshKey])
 
   // Automatic default insight fetch for status page

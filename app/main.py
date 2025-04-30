@@ -248,4 +248,14 @@ def get_insight(params: InsightParams):
         logger.error(f"ollama stderr: {result.stderr}")
         err_msg = result.stderr.strip()
         summary = err_msg or f"AI 생성 실패 (exit code {result.returncode})"
-    return {"insight": summary} 
+    return {"insight": summary}
+
+# Endpoint to manually refresh data from CSV to DB
+@app.post("/api/refresh-data")
+def refresh_data_endpoint():
+    """Fetch the remote CSV, replace DB table, and reload in-memory data."""
+    fetch_csv_to_db()
+    global df, dimensions
+    df = load_df(db_path, table_name)
+    dimensions = aggregate_dimension(df)
+    return {"status": "data refreshed"} 
