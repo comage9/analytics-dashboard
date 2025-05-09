@@ -12,6 +12,7 @@ interface ForecastDataItem {
   yhat: number
   yhat_lower: number
   yhat_upper: number
+  yhat_corrected?: number
 }
 
 interface ForecastChartProps {
@@ -28,12 +29,16 @@ const ForecastChart: React.FC<ForecastChartProps> = ({ item, category, periods =
 
   useEffect(() => {
     axios.post('/api/forecast', { item, category, periods, from_date: fromDate, last_date: lastDate, use_custom: useCustom })
-      .then(res => setData(res.data))
+      .then(res => {
+        const payload = Array.isArray(res.data) ? res.data : res.data.forecast;
+        setData(payload || []);
+      })
       .catch(err => console.error(err))
-  }, [item, category, periods, fromDate, lastDate])
+  }, [item, category, periods, fromDate, lastDate, useCustom])
 
   const labels = data.map(item => item.ds)
-  const values = data.map(item => Math.max(0, item.yhat))
+  const useCorrected = data.length > 0 && data[0].yhat_corrected !== undefined
+  const values = data.map(item => Math.max(0, useCorrected ? (item.yhat_corrected as number) : item.yhat))
   const lower = data.map(item => Math.max(0, item.yhat_lower))
   const upper = data.map(item => Math.max(0, item.yhat_upper))
 
@@ -50,7 +55,9 @@ const ForecastChart: React.FC<ForecastChartProps> = ({ item, category, periods =
     labels,
     datasets: [
       {
-        label: '예측 수량(박스)',
+        label: useCorrected
+          ? '보정된 예측 수량(박스)'
+          : '예측 수량(박스)',
         data: values,
         borderColor: 'rgba(255,99,132,1)',
         backgroundColor: 'rgba(255,99,132,0.2)',

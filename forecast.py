@@ -60,6 +60,8 @@ def forecast_series(df, date_col, value_col, periods=30, freq='D', use_custom: b
     ts['season'] = ts['ds'].dt.month.apply(get_season)
     season_dummies = pd.get_dummies(ts['season'], prefix='season')
     ts = pd.concat([ts, season_dummies], axis=1)
+    # Drop original categorical columns to avoid non-numeric regressors
+    ts = ts.drop(columns=['weekday', 'period_code', 'season'])
     # Merge exogenous variables if provided
     if exog_cols:
         exog_df = df[[date_col] + exog_cols].copy()
@@ -113,6 +115,8 @@ def forecast_series(df, date_col, value_col, periods=30, freq='D', use_custom: b
     forecast['yhat'] = forecast['yhat'].round().astype(int)
     forecast['yhat_lower'] = forecast['yhat_lower'].round().astype(int)
     forecast['yhat_upper'] = forecast['yhat_upper'].round().astype(int)
+    # Add non-negative clipping for forecast values
+    forecast[['yhat', 'yhat_lower', 'yhat_upper']] = forecast[['yhat', 'yhat_lower', 'yhat_upper']].clip(lower=0)
     return forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']]
 
 def prophet_grid_search(ts, param_grid, cv_params):
@@ -237,10 +241,17 @@ def predict_with_residual_correction(model, forecast_df, events_df=None):
         df = df.merge(events_df, on='ds', how='left').fillna(0)
         event_cols = [c for c in events_df.columns if c != 'ds']
         X = pd.concat([X, df[event_cols]], axis=1)
-    # Align with model features
-    X = X[model.feature_names_]
-    df['residual_pred'] = model.predict(X)
-    df['yhat_corrected'] = (df['yhat'] + df['residual_pred']).round().astype(int)
+    # Align with model features, filling missing columns with zeros to avoid KeyError
+    X = X.reindex(columns=model.feature_names_, fill_value=0)
+    # Convert all feature columns to numeric type (float) for LightGBM
+    X = X.astype(float)
+    try:
+        df['residual_pred'] = model.predict(X)
+        df['yhat_corrected'] = (df['yhat'] + df['residual_pred']).round().astype(int).clip(lower=0)
+    except Exception as e:
+        # 예측 실패 시, 보정 없이 원본 yhat 사용
+        df['yhat_corrected'] = df['yhat']
+    # 항상 입력과 동일한 'ds' 순서로 반환
     return df[['ds', 'yhat_corrected']]
 
 
@@ -296,6 +307,24 @@ def detect_drift(ts_df, forecast_df, forecast_col='yhat', window=30, threshold=0
     print(f"Recent {window}-day MAPE on {forecast_col}: {mape_score:.3f}")
     return mape_score > threshold
 
+def safe_forecast_series(df, date_col, value_col, periods=30, freq='D', use_custom=False, exog_cols=None, events_df=None):
+    ts = df[[date_col, value_col]].dropna().rename(columns={date_col: 'ds', value_col: 'y'})
+    ts = ts.groupby('ds')['y'].sum().reset_index()
+    if len(ts) < 10:
+        # Fallback: 최근 7일 평균값을 미래로 반복
+        avg = ts['y'].tail(7).mean() if not ts.empty else 0
+        last_date = ts['ds'].max() if not ts.empty else pd.Timestamp.today()
+        future_dates = [last_date + pd.Timedelta(days=i) for i in range(1, periods+1)]
+        return pd.DataFrame({'ds': future_dates, 'yhat': [avg]*periods, 'yhat_lower': [avg]*periods, 'yhat_upper': [avg]*periods})
+    try:
+        return forecast_series(df, date_col, value_col, periods, freq, use_custom, exog_cols, events_df)
+    except Exception as e:
+        # Fallback: 최근 7일 평균값 반복
+        avg = ts['y'].tail(7).mean() if not ts.empty else 0
+        last_date = ts['ds'].max() if not ts.empty else pd.Timestamp.today()
+        future_dates = [last_date + pd.Timedelta(days=i) for i in range(1, periods+1)]
+        return pd.DataFrame({'ds': future_dates, 'yhat': [avg]*periods, 'yhat_lower': [avg]*periods, 'yhat_upper': [avg]*periods})
+
 def main():
     db_path = 'vf.db'
     table = 'vf 출고 수량 ocr google 보고서 - 일별 출고 수량 (4)'
@@ -323,7 +352,7 @@ def main():
     best_params = prophet_grid_search(ts_all, param_grid, cv_params)
     # Forecast with best parameters
     print("Forecasting overall daily 수량(박스) with best parameters for next 30 days...")
-    forecast_all = forecast_series(df, '일자', '수량(박스)', periods=30, freq='D', use_custom=True, exog_cols=exog_cols, events_df=events_df)
+    forecast_all = safe_forecast_series(df, '일자', '수량(박스)', periods=30, freq='D', use_custom=True, exog_cols=exog_cols, events_df=events_df)
     # Evaluate best model
     print("Evaluating Prophet model with best parameters:")
     model_best = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False,
@@ -383,7 +412,7 @@ def main():
     example_category = df[df['품목']==example_item]['분류'].iloc[0]
     print(f"Forecasting for item '{example_item}', category '{example_category}'")
     df_sub = df[(df['품목']==example_item) & (df['분류']==example_category)]
-    forecast_sub = forecast_series(df_sub, '일자', '수량(박스)', periods=30, freq='D')
+    forecast_sub = safe_forecast_series(df_sub, '일자', '수량(박스)', periods=30, freq='D')
     print(forecast_sub.tail())
 
 if __name__ == '__main__':

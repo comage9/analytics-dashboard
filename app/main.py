@@ -1,21 +1,25 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import os
 from typing import Optional
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 from dotenv import load_dotenv
 import pandas as pd
+import numpy as np
+from sklearn.metrics import mean_squared_error, mean_absolute_error, mean_absolute_percentage_error
 import subprocess
 import logging
 import sqlite3
+import requests
+import io
 
 # Configure logger for debugging
 logger = logging.getLogger("uvicorn.error")
 logger.setLevel(logging.DEBUG)
 
 from app.analysis import load_df, aggregate_dimension, aggregate_trend
-from forecast import forecast_series
+from forecast import forecast_series, create_events_df, train_residual_model, predict_with_residual_correction, safe_forecast_series
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Load settings
@@ -26,15 +30,75 @@ table_name = os.getenv("TABLE_NAME", "vf 출고 수량 ocr google 보고서 - �
 # CSV URL for real-time data updates
 CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQwqI0BG-d2aMrql7DK4fQQTjvu57VtToSLAkY_nq92a4Cg5GFVbIn6_IR7Fq6_O-2TloFSNlXT8ZWC/pub?gid=1152588885&single=true&output=csv"
 
+REALTIME_CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQYW_XI-stT0t4KqqpDW0DcBud_teV8223_vupnZsO3DrbqRqZkwXBplXSld8sB_qEXL92Ckn7J8B29/pub?gid=572466553&single=true&output=csv'
+DB_PATH = 'your.db'  # adjust as needed
+
 def fetch_csv_to_db():
     try:
         df_csv = pd.read_csv(CSV_URL)
+        # 고유키 후보: 일자, 품목, 분류 (컬럼명 확인 필요)
+        key_cols = ['일자', '품목', '분류']
         conn = sqlite3.connect(db_path)
-        df_csv.to_sql(table_name, conn, if_exists='replace', index=False)
+        # 테이블이 없으면 생성 (컬럼명 자동 추출)
+        cols = ', '.join([f'"{c}" TEXT' for c in df_csv.columns])
+        key_str = ', '.join([f'"{c}"' for c in key_cols])
+        # 기본적으로 TEXT로 생성, 필요시 타입 조정
+        conn.execute(f'CREATE TABLE IF NOT EXISTS "{table_name}" ({cols}, PRIMARY KEY ({key_str}))')
+        # 기존 DB 데이터 불러오기
+        try:
+            df_db = pd.read_sql_query(f'SELECT * FROM "{table_name}"', conn)
+        except Exception:
+            df_db = pd.DataFrame(columns=df_csv.columns)
+        # 신규/수정 데이터만 추출
+        if not df_db.empty:
+            merged = df_csv.merge(df_db, on=key_cols, how='left', indicator=True, suffixes=('', '_db'))
+            to_upsert = merged[merged['_merge'] != 'both'][df_csv.columns]
+        else:
+            to_upsert = df_csv
+        # upsert (ON CONFLICT DO UPDATE)
+        if not to_upsert.empty:
+            placeholders = ','.join(['?'] * len(df_csv.columns))
+            update_cols = ','.join([f'"{c}"=excluded."{c}"' for c in df_csv.columns if c not in key_cols])
+            sql = f'INSERT INTO "{table_name}" ({",".join([f"\"{c}\"" for c in df_csv.columns])}) VALUES ({placeholders}) ON CONFLICT({key_str}) DO UPDATE SET {update_cols}'
+            conn.executemany(sql, to_upsert.values.tolist())
+            conn.commit()
         conn.close()
-        logger.debug(f"Fetched CSV data ({df_csv.shape}) saved to {table_name}")
+        logger.debug(f"Fetched CSV data ({df_csv.shape}), upserted {len(to_upsert)} rows to {table_name}")
     except Exception as e:
         logger.error(f"Error fetching CSV data: {e}")
+
+def download_and_store_realtime():
+    resp = requests.get(REALTIME_CSV_URL)
+    resp.raise_for_status()
+    # Try utf-8-sig, then cp949, then fallback
+    try:
+        df = pd.read_csv(io.BytesIO(resp.content), encoding='utf-8-sig')
+    except Exception:
+        try:
+            df = pd.read_csv(io.BytesIO(resp.content), encoding='cp949')
+        except Exception:
+            df = pd.read_csv(io.BytesIO(resp.content))
+    df.columns = [str(c).strip() for c in df.columns]
+    # If columns are field1, field2, ... use first row as header
+    if all(str(col).startswith('field') for col in df.columns):
+        df.columns = df.iloc[0]
+        df = df[1:].reset_index(drop=True)
+        df.columns = [str(c).strip() for c in df.columns]
+    # Auto-detect columns
+    date_col = next((c for c in df.columns if '날짜' in c or '일자' in c), None)
+    day_col = next((c for c in df.columns if '요일' in c), None)
+    total_col = next((c for c in df.columns if '합계' in c), None)
+    if not (date_col and day_col and total_col):
+        raise Exception(f'필수 컬럼이 없습니다: {df.columns}')
+    melt = df.melt(id_vars=[date_col, day_col, total_col], var_name='hour', value_name='shipment')
+    melt['hour'] = pd.to_numeric(melt['hour'], errors='coerce')
+    melt = melt.dropna(subset=['hour'])
+    melt['hour'] = melt['hour'].astype(int)
+    melt[date_col] = pd.to_datetime(melt[date_col], errors='coerce').dt.strftime('%Y-%m-%d')
+    melt = melt.rename(columns={date_col: '날짜'})
+    conn = sqlite3.connect(DB_PATH)
+    melt.to_sql('realtime_shipments', conn, if_exists='replace', index=False)
+    conn.close()
 
 # Initialize application and data
 app = FastAPI(title="출고 수량 분석 API")
@@ -53,6 +117,12 @@ fetch_csv_to_db()
 df = load_df(db_path, table_name)
 dimensions = aggregate_dimension(df)
 
+# NEW: Download realtime data at startup
+try:
+    download_and_store_realtime()
+except Exception as e:
+    logger.error(f'Failed to download realtime data at startup: {e}')
+
 # Scheduler to refresh data daily at midnight
 def refresh_data():
     global df, dimensions
@@ -62,7 +132,8 @@ def refresh_data():
     dimensions = aggregate_dimension(df)
 
 scheduler = AsyncIOScheduler()
-scheduler.add_job(refresh_data, 'cron', hour=0)
+scheduler.add_job(refresh_data, 'cron', hour=0) # Main historical data (daily)
+scheduler.add_job(download_and_store_realtime, 'interval', hours=1) # Real-time hourly data (every hour)
 scheduler.start()
 
 # Models
@@ -79,6 +150,13 @@ class ForecastParams(BaseModel):
     from_date: Optional[date] = None
     last_date: Optional[date] = None
     use_custom: bool = False
+    freq: Optional[str] = None
+
+class BacktestParams(BaseModel):
+    item: Optional[str] = None
+    category: Optional[str] = None
+    from_date: Optional[date] = None
+    to_date: Optional[date] = None
 
 # Routes
 @app.get("/", include_in_schema=False)
@@ -105,6 +183,95 @@ def get_trend(params: TrendParams):
 @app.post("/api/forecast")
 def get_forecast(params: ForecastParams):
     """Return forecasted values for 수량(박스) filtered by item, category, and date range."""
+    # 시간별 예측 요청 시, 최근 7일간 평균 시간별 출고량 누적으로 예측
+    if getattr(params, 'freq', None) == 'H':
+        logger.debug("Handling hourly forecast request based on avg increments")
+        today_dt = pd.to_datetime(params.from_date or datetime.now().strftime('%Y-%m-%d'))
+        # 실제 오늘 데이터
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            df_today = pd.read_sql_query(
+                "SELECT hour, shipment FROM realtime_shipments WHERE 날짜 = ? ORDER BY hour",
+                conn, params=[today_dt.strftime('%Y-%m-%d')]
+            )
+            logger.debug(f"Today's data (df_today) shape: {df_today.shape}\n{df_today.head()}")
+        except Exception as e:
+            logger.error(f"Error fetching today's data: {e}")
+            df_today = pd.DataFrame({'hour':[], 'shipment':[]})
+        # 과거 7일 데이터
+        seven = (today_dt - pd.Timedelta(days=7)).strftime('%Y-%m-%d')
+        try:
+            df_hist = pd.read_sql_query(
+                "SELECT 날짜, hour, shipment FROM realtime_shipments WHERE 날짜 >= ? AND 날짜 < ? ORDER BY 날짜, hour",
+                conn, params=[seven, today_dt.strftime('%Y-%m-%d')]
+            )
+            logger.debug(f"History data (df_hist) shape: {df_hist.shape}\n{df_hist.head()}")
+        except Exception as e:
+            logger.error(f"Error fetching history data: {e}")
+            df_hist = pd.DataFrame({'날짜':[], 'hour':[], 'shipment':[]})
+        conn.close()
+
+        # 오늘 데이터에서 실적이 있는 시간대 찾기
+        present_hours = df_today.dropna(subset=['shipment'])['hour'].astype(int).tolist()
+        first_missing_hour = next((h for h in range(24) if h not in present_hours), 24)
+        forecastStart = first_missing_hour  # 실적이 없는 첫 시간부터 예측 시작
+
+        # 누적 실적의 마지막 값을 예측의 시작점으로 사용
+        if present_hours:
+            last_actual_hour = max(present_hours)
+            # shipment 값이 NaN일 경우 0으로 대체
+            shipment_val = df_today[df_today['hour'] == last_actual_hour]['shipment'].values
+            if len(shipment_val) > 0 and pd.notna(shipment_val[0]):
+                last_actual_cum = int(shipment_val[0])
+            else:
+                # 마지막 유효한(숫자인) shipment 값 찾기
+                valid_shipments = df_today.dropna(subset=['shipment'])
+                if not valid_shipments.empty:
+                    last_actual_cum = int(valid_shipments.iloc[-1]['shipment'])
+                else:
+                    last_actual_cum = 0
+        else:
+            last_actual_cum = 0
+
+        logger.debug(f"실적 데이터가 있는 시간대: {present_hours}")
+        logger.debug(f"실적이 없는 첫 시간: {forecastStart}")
+        logger.debug(f"누적 실적 마지막 값: {last_actual_cum}")
+
+        # 시간별 평균 *증가량* 계산
+        df_hist['shipment'] = pd.to_numeric(df_hist['shipment'], errors='coerce')
+        df_hist = df_hist.dropna(subset=['shipment']) # NaN shipment 값 제거
+        df_hist = df_hist.sort_values(by=['날짜', 'hour'])
+        df_hist['increment'] = df_hist.groupby('날짜')['shipment'].diff() # diff 후 NaN 가능성 있음 (각 날짜의 첫 시간)
+        
+        # 평균 증가량 계산 시 NaN을 0으로 채우고, 음수 증가량은 0으로 처리
+        avg_inc_per_hour = df_hist.groupby('hour')['increment'].mean().fillna(0).clip(lower=0).to_dict()
+        logger.debug(f"Average increment per hour: {avg_inc_per_hour}")
+
+        # 예측 누적값 계산 (평균 증가량 기반)
+        result = []
+        pred_cum = last_actual_cum
+        for h in range(forecastStart, 24):
+            inc = avg_inc_per_hour.get(h, 0)
+            if pd.isna(inc):
+                inc = 0
+            pred_cum += inc
+            ds = today_dt + pd.Timedelta(hours=h)
+            result.append({'ds': ds.strftime('%Y-%m-%dT%H:%M:%S'), 'yhat': int(round(pred_cum))})
+        # 0~23시 전체에 대해 실적이 없는 시간대는 예측값, 실적이 있는 시간대는 None으로 채움
+        full_result = []
+        for h in range(24):
+            ds = today_dt + pd.Timedelta(hours=h)
+            if h in present_hours:
+                full_result.append({'ds': ds.strftime('%Y-%m-%dT%H:%M:%S'), 'yhat': None})
+            else:
+                found = next((r for r in result if pd.to_datetime(r['ds']).hour == h), None)
+                if found and found['yhat'] is not None:
+                    full_result.append(found)
+                else:
+                    full_result.append({'ds': ds.strftime('%Y-%m-%dT%H:%M:%S'), 'yhat': 0})
+        logger.debug(f"Final forecast result (hourly, full 0~23): {full_result}")
+        return {'forecast': full_result}
+    # 그 외 일별 예측
     df2 = df
     # Debug: log input parameters
     logger.debug(f"get_forecast called with: {params}")
@@ -117,21 +284,55 @@ def get_forecast(params: ForecastParams):
     if params.category:
         df2 = df2[df2['분류'] == params.category]
         logger.debug(f"Filtered by category '{params.category}', size: {df2.shape}")
-    # Filter by historical period
-    if params.from_date:
-        df2 = df2[df2['일자'] >= pd.to_datetime(params.from_date)]
-        logger.debug(f"Filtered by from_date '{params.from_date}', size: {df2.shape}")
+    # Create event flags for improved accuracy and residual correction
+    start_date = df2['일자'].min()
+    events_df = create_events_df(start_date, start_date + timedelta(days=params.periods))
+    # Generate full forecast including historical and future
+    forecast_full = safe_forecast_series(
+        df2,
+        '일자',
+        '수량(박스)',
+        periods=params.periods,
+        freq=params.freq or 'D',
+        use_custom=params.use_custom,
+        events_df=events_df
+    )
+    logger.debug(f"Full forecast results sample:\n{forecast_full.head()}")
     if params.last_date:
-        df2 = df2[df2['일자'] <= pd.to_datetime(params.last_date)]
-        logger.debug(f"Filtered by last_date '{params.last_date}', size: {df2.shape}")
-    # Generate forecast
-    forecast_df = forecast_series(df2, '일자', '수량(박스)', periods=params.periods, use_custom=params.use_custom)
-    # Debug: show sample of forecast results
-    logger.debug(f"Forecast results sample:\n{forecast_df.head()}")
-    # Return only future dates beyond last_date
-    if params.last_date:
-        forecast_df = forecast_df[forecast_df['ds'] > pd.to_datetime(params.last_date)]
-    return forecast_df.to_dict(orient="records")
+        cutoff = pd.to_datetime(params.last_date)
+        # Prepare actual historical data
+        ts_hist = df2[['일자', '수량(박스)']].dropna().rename(columns={'일자':'ds','수량(박스)':'y'})
+        ts_hist = ts_hist.groupby('ds')['y'].sum().reset_index()
+        try:
+            # Align predictions with actuals by merging on ds
+            hist_pred = forecast_full[['ds', 'yhat']].merge(ts_hist, on='ds', how='inner')
+            actuals = hist_pred['y']
+            preds = hist_pred['yhat']
+            # Compute error metrics (skip if empty)
+            if len(actuals) > 0 and len(preds) > 0:
+                mse = mean_squared_error(actuals, preds)
+                mae = mean_absolute_error(actuals, preds)
+                mape = mean_absolute_percentage_error(actuals, preds)
+            else:
+                mse = mae = mape = None
+            # Generate future forecasts using last_date cutoff
+            forecast_future = forecast_full[forecast_full['ds'] > cutoff].copy()
+            # 잔차 보정도 데이터가 있을 때만
+            if not hist_pred.empty and not forecast_future.empty:
+                residual_model = train_residual_model(ts_hist, hist_pred[['ds','yhat']], events_df=events_df)
+                corrected_df = predict_with_residual_correction(residual_model, forecast_future, events_df=events_df)
+                forecast_future = forecast_future.merge(corrected_df, on='ds', how='left')
+            return {
+                'metrics': {'mse': mse, 'mae': mae, 'mape': mape},
+                'forecast': forecast_future.to_dict(orient='records')
+            }
+        except Exception as e:
+            logger.error(f"Residual correction failed, returning raw forecast. Error: {e}")
+            # Fallback: return only future forecast values
+            forecast_future = forecast_full[forecast_full['ds'] > cutoff].copy() if 'cutoff' in locals() else forecast_full
+            return forecast_future.to_dict(orient='records')
+    else:
+        return forecast_full.to_dict(orient='records')
 
 # Endpoint to get unique items (품목)
 @app.get("/api/items")
@@ -258,4 +459,98 @@ def refresh_data_endpoint():
     global df, dimensions
     df = load_df(db_path, table_name)
     dimensions = aggregate_dimension(df)
-    return {"status": "data refreshed"} 
+    return {"status": "data refreshed"}
+
+@app.post("/api/backtest")
+def get_backtest(params: BacktestParams):
+    """Return historical daily forecast and error rate between from_date and to_date."""
+    df2 = df
+    if params.item:
+        df2 = df2[df2['품목'] == params.item]
+    if params.category:
+        df2 = df2[df2['분류'] == params.category]
+    if params.from_date:
+        df2 = df2[df2['일자'] >= pd.to_datetime(params.from_date)]
+    if params.to_date:
+        df2 = df2[df2['일자'] <= pd.to_datetime(params.to_date)]
+    # Get forecast series including historical dates
+    hist_fc = forecast_series(df2, '일자', '수량(박스)', periods=0, freq='D')
+    # Prepare actuals
+    actual = df2[['일자', '수량(박스)']].dropna().rename(columns={'일자':'ds', '수량(박스)':'y'})
+    actual = actual.groupby('ds')['y'].sum().reset_index()
+    # Merge and compute error rate
+    merged = hist_fc.merge(actual, on='ds', how='inner')
+    merged['error_rate'] = (merged['yhat'] - merged['y']).abs() / merged['y'] * 100
+    # Return per-day records
+    return merged[['ds', 'y', 'yhat', 'yhat_lower', 'yhat_upper', 'error_rate']].to_dict(orient='records')
+
+@app.post('/api/realtime/refresh')
+def refresh_realtime():
+    download_and_store_realtime()  # 동기 실행
+    return {'status': 'refresh completed'}
+
+@app.get('/api/realtime/today')
+def get_today_realtime():
+    today = datetime.now().strftime('%Y-%m-%d')
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        df = pd.read_sql_query(
+            "SELECT hour, shipment FROM realtime_shipments WHERE 날짜 = ? ORDER BY hour",
+            conn, params=(today,))
+    except Exception as e:
+        logger.warning(f'realtime_shipments table missing, attempting to download: {e}')
+        download_and_store_realtime()
+        df = pd.read_sql_query(
+            "SELECT hour, shipment FROM realtime_shipments WHERE 날짜 = ? ORDER BY hour",
+            conn, params=(today,))
+    finally:
+        conn.close()
+    # Fill missing hours with None, and convert NaN to None
+    result = [None]*24
+    for _, row in df.iterrows():
+        h = int(row['hour'])
+        val = row['shipment']
+        if pd.isna(val):
+            result[h] = None
+        else:
+            result[h] = float(val)
+    return {'date': today, 'shipments': result}
+
+@app.get('/api/realtime/history')
+def get_realtime_history(date: str):
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql_query(
+        "SELECT hour, shipment FROM realtime_shipments WHERE 날짜 = ? ORDER BY hour",
+        conn, params=(date,))
+    conn.close()
+    result = [None]*24
+    for _, row in df.iterrows():
+        h = int(row['hour'])
+        val = row['shipment']
+        if pd.isna(val):
+            result[h] = None
+        else:
+            result[h] = float(val)
+    return {'date': date, 'shipments': result}
+
+@app.get('/api/realtime/weekday-trend')
+def get_weekday_trend():
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql_query("SELECT 날짜, hour, shipment FROM realtime_shipments", conn)
+    conn.close()
+    df['날짜'] = pd.to_datetime(df['날짜'], errors='coerce')
+    df = df.dropna(subset=['날짜'])
+    df['weekday'] = df['날짜'].dt.weekday  # Monday=0, Sunday=6
+    # 최근 4주만 사용
+    max_date = df['날짜'].max()
+    min_date = max_date - pd.Timedelta(days=28)
+    df_recent = df[df['날짜'] >= min_date]
+    # 요일별, 시간별 평균
+    weekday_map = {0:'Mon', 1:'Tue', 2:'Wed', 3:'Thu', 4:'Fri', 5:'Sat', 6:'Sun'}
+    result = {}
+    for wd in range(7):
+        arr = [None]*24
+        for h in range(24):
+            vals = df_recent[(df_recent['weekday']==wd) & (df_recent['hour']==h)]['shipment']
+            arr[h] = float(vals.mean()) if not vals.empty else None
+        result[weekday_map[wd]] = arr 

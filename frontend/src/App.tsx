@@ -1,9 +1,13 @@
 import React, { useState, useEffect } from 'react'
 import axios from 'axios'
-import TrendChart from './components/TrendChart'
+import TrendChart, { ShippingTable } from './components/TrendChart'
 import ForecastChart from './components/ForecastChart'
 import ItemCategorySelector from './components/ItemCategorySelector'
+import RealtimeShipmentChart from './components/RealtimeShipmentChart'
+import WeekdayTrendChart from './components/WeekdayTrendChart'
 import './App.css'
+import './ModernNav.css'
+import { useState as useAppState } from 'react'
 
 // Removed OverviewChart and dimension selector per user request
 
@@ -16,16 +20,21 @@ const App: React.FC = () => {
   // Forecast period selection
   const [forecastRangeType, setForecastRangeType] = useState<string>('week')
   const [forecastDays, setForecastDays] = useState<number>(7)
+  // Toggle custom Prophet seasonalities in forecast
+  const [useCustomForecast, setUseCustomForecast] = useState<boolean>(false)
   // AI 모델 및 인사이트
   const [models, setModels] = useState<string[]>([])
-  const [selectedModel, setSelectedModel] = useState<string>('')
+  const [selectedModel, setSelectedModel] = useState<string>('gemma3:latest')
   const [insight, setInsight] = useState<string>('')
-  const [page, setPage] = useState<string>('status')
+  const [page, setPage] = useState<string>('realtime')
   const [loading, setLoading] = useState<boolean>(false)
   const [messages, setMessages] = useState<{ role: string; content: string }[]>([])
   const [question, setQuestion] = useState<string>('')
   // For triggering manual refresh
   const [refreshKey, setRefreshKey] = useState<number>(0)
+  const [showWeekdayTrend, setShowWeekdayTrend] = useState(false)
+  // 현황분석 데이터 상태를 App에서 관리
+  const [trendData, setTrendData] = useAppState<any[]>([])
 
   useEffect(() => {
     if (rangeType === 'custom') return
@@ -71,7 +80,7 @@ const App: React.FC = () => {
       })
       .then(res => {
         setModels(res.data);
-        if (res.data.length) setSelectedModel(res.data[0]);
+        if (res.data.length && !res.data.includes(selectedModel)) setSelectedModel('gemma3:latest');
       })
       .catch(err => console.error('Refresh error:', err));
   }, [refreshKey])
@@ -80,19 +89,22 @@ const App: React.FC = () => {
   useEffect(() => {
     if (page !== 'status') return;
     setLoading(true);
+    // 기존 프롬프트로 복구
+    const reportPrompt = `아래의 출고 데이터와 비교 기준(전일, 전주, 전월, 전년동기 등)을 참고하여, 심층 출고량 분석 보고서를 한글로 작성해줘. 아래 양식에 맞춰줘:\n\n[심층 출고량 분석 보고서 양식]\n1. 요약\n2. 금일 출고 개요\n3. 목표/예측 대비 실적\n4. 과거 기간과의 비교 분석(전일, 전주, 전월, 전년동기)\n5. 심층 분석 및 영향 요인\n6. 트렌드 및 향후 전망\n7. 이슈/과제/특이사항\n8. 권고 및 액션아이템\n9. 부록(필요시)\n\n출고 데이터: ${JSON.stringify(trendData)}\n기간: ${fromDate} ~ ${toDate}`;
     axios.post('/api/insight', {
       item: selectedItem,
       category: selectedCategory,
       from_date: fromDate,
       to_date: toDate,
-      model: selectedModel
+      model: selectedModel,
+      question: reportPrompt
     }).then(res => {
       setMessages([{ role: 'assistant', content: res.data.insight }]);
     }).catch(err => {
       console.error(err);
       setMessages([{ role: 'assistant', content: '기본 인사이트를 불러오는 중 오류가 발생했습니다.' }]);
     }).finally(() => setLoading(false));
-  }, [page, selectedItem, selectedCategory, fromDate, toDate, selectedModel, refreshKey]);
+  }, [page, selectedItem, selectedCategory, fromDate, toDate, selectedModel, refreshKey, trendData]);
 
   return (
     <div className="app-container">
@@ -107,11 +119,49 @@ const App: React.FC = () => {
         <button onClick={() => setRefreshKey(prev => prev + 1)}>데이터 새로고침</button>
       </div>
       {/* 3. 페이지 네비게이션 */}
-      <div className="comp-item page-nav">
+      <nav className="modern-nav">
         <span className="comp-label">3</span>
-        <button disabled={page === 'status'} onClick={() => setPage('status')}>현황 분석</button>
-        <button disabled={page === 'forecast'} onClick={() => setPage('forecast')}>예측 분석</button>
-      </div>
+        <button
+          className={`modern-nav-btn${page === 'realtime' ? ' active' : ''}`}
+          onClick={() => setPage('realtime')}
+          disabled={page === 'realtime'}
+        >
+          당일 출고 현황
+        </button>
+        <button
+          className={`modern-nav-btn${page === 'status' ? ' active' : ''}`}
+          onClick={() => setPage('status')}
+          disabled={page === 'status'}
+        >
+          현황 분석
+        </button>
+        <button
+          className={`modern-nav-btn${page === 'looker' ? ' active' : ''}`}
+          onClick={() => setPage('looker')}
+          disabled={page === 'looker'}
+        >
+          Looker Studio 리포트
+        </button>
+        <button
+          className={`modern-nav-btn${page === 'forecast' ? ' active' : ''}`}
+          onClick={() => setPage('forecast')}
+          disabled={page === 'forecast'}
+        >
+          예측 분석
+        </button>
+      </nav>
+
+      {/* 당일 출고 현황 페이지 */}
+      {page === 'realtime' && (
+        <>
+          <div className="comp-item">
+            <button onClick={() => setShowWeekdayTrend(v => !v)}>
+              {showWeekdayTrend ? '당일 출고 현황 보기' : '요일별 출고 트렌드 보기'}
+            </button>
+          </div>
+          {showWeekdayTrend ? <WeekdayTrendChart /> : <RealtimeShipmentChart />}
+        </>
+      )}
 
       {/* 현황 분석 페이지 */}
       {page === 'status' && (
@@ -152,15 +202,25 @@ const App: React.FC = () => {
               category={selectedCategory}
               fromDate={fromDate}
               toDate={toDate}
+              data={trendData}
+              setData={setTrendData}
+            />
+          </div>
+          {/* 6-1. 출고량/판매금액 표 */}
+          <div className="chart-container">
+            <ShippingTable
+              data={trendData}
+              fromDate={fromDate}
+              toDate={toDate}
             />
           </div>
           {/* 7. AI 인사이트 챗봇 */}
           <div className="comp-item ai-container">
             <span className="comp-label">7</span>
             {loading ? (
-              <p>인사이트 로딩 중...</p>
+              <p>심층 출고량 분석 보고서 생성 중...</p>
             ) : (
-              <div className="chat-window">
+              <div className="insight-report-box">
                 {messages.map((m, idx) => (
                   <div key={idx} className={`chat-message ${m.role}`}> 
                     <strong>{m.role === 'user' ? '사용자' : 'AI'}:</strong> {m.content}
@@ -205,9 +265,18 @@ const App: React.FC = () => {
             <span className="comp-label">8</span>
             <h2>예측 분석</h2>
           </div>
-          {/* 9. 예측 기간 선택 */}
+          {/* 9. 분류/품목 선택 */}
+          <div className="comp-item">
+            <ItemCategorySelector
+              item={selectedItem}
+              category={selectedCategory}
+              onItemChange={setSelectedItem}
+              onCategoryChange={setSelectedCategory}
+            />
+          </div>
+          {/* 10. 예측 기간 선택 */}
           <div className="control-panel comp-item">
-            <span className="comp-label">9</span>
+            <span className="comp-label">10</span>
             <label>예측 기간 유형: </label>
             <select value={forecastRangeType} onChange={e => setForecastRangeType(e.target.value)}>
               <option value="week">1주일</option>
@@ -219,7 +288,18 @@ const App: React.FC = () => {
               <input type="number" min={1} value={forecastDays} onChange={e => setForecastDays(Number(e.target.value))} />
             )}
           </div>
-          {/* 10. 예측 차트 */}
+          {/* 11. 커스텀 모델 토글 */}
+          <div className="comp-item">
+            <label>
+              <input
+                type="checkbox"
+                checked={useCustomForecast}
+                onChange={e => setUseCustomForecast(e.target.checked)}
+              />
+              커스텀 Prophet 모델 사용
+            </label>
+          </div>
+          {/* 12. 예측 차트 */}
           <div className="chart-container">
             <ForecastChart
               item={selectedItem}
@@ -227,9 +307,27 @@ const App: React.FC = () => {
               periods={forecastDays}
               fromDate={fromDate}
               lastDate={toDate}
+              useCustom={useCustomForecast}
             />
           </div>
         </>
+      )}
+      {/* Looker Studio 리포트 페이지 */}
+      {page === 'looker' && (
+        <div className="chart-container">
+          <h2>Looker Studio 리포트</h2>
+          <p>
+            아래 버튼을 클릭하면 새 창에서 리포트가 열립니다.<br />
+            <a
+              href="https://lookerstudio.google.com/s/iPtHIDHt2Zk"
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ fontSize: '1.2em', color: '#1976d2', textDecoration: 'underline' }}
+            >
+              Looker Studio 리포트 바로가기
+            </a>
+          </p>
+        </div>
       )}
     </div>
   )

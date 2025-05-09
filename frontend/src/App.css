@@ -98,3 +98,94 @@ body, input, button {
   border: none;
   cursor: pointer;
 }
+
+/* Modern button style for dashboard (통일성 유지) */
+.modern-btn {
+  background: #fff;
+  color: #1976d2;
+  border: none;
+  border-radius: 999px;
+  padding: 12px 32px;
+  font-size: 1.05em;
+  font-weight: 500;
+  box-shadow: 0 2px 8px 0 rgba(60, 60, 100, 0.06);
+  transition: background 0.18s, color 0.18s, box-shadow 0.18s;
+  cursor: pointer;
+  outline: none;
+  margin-left: 8px;
+  margin-right: 8px;
+  letter-spacing: 0.01em;
+}
+.modern-btn:hover {
+  background: #eaf3ff;
+  color: #1256a6;
+  box-shadow: 0 2px 12px 0 rgba(79, 140, 255, 0.10);
+}
+
+.comp-item button, .control-panel button {
+  /* Remove default styles, apply modern-btn */
+  all: unset;
+  display: inline-block;
+  cursor: pointer;
+}
+.comp-item button, .control-panel button {
+  composes: modern-btn;
+}
+
+.control-panel, .chart-controls {
+  background: #f7f8fa;
+  border-radius: 14px;
+  box-shadow: 0 1px 8px 0 rgba(60, 60, 100, 0.05);
+  padding: 18px 24px;
+  margin-bottom: 18px;
+  font-family: 'Inter', 'Pretendard', 'Noto Sans KR', Arial, sans-serif;
+}
+
+.chart-controls label, .control-panel label {
+  margin-right: 18px;
+  font-size: 1em;
+  color: #222;
+  font-weight: 500;
+}
+
+.chart-controls input[type="checkbox"] {
+  accent-color: #4f8cff;
+  margin-left: 4px;
+  margin-right: 8px;
+  width: 18px;
+  height: 18px;
+}
+
+.chart-controls select, .control-panel select, .chart-controls input[type="number"], .control-panel input[type="date"] {
+  border: 1px solid #d0d7e2;
+  border-radius: 8px;
+  padding: 6px 16px;
+  font-size: 1em;
+  background: #fff;
+  margin-left: 4px;
+  margin-right: 12px;
+  font-family: inherit;
+  transition: border 0.15s;
+}
+.chart-controls select:focus, .control-panel select:focus, .chart-controls input[type="number"]:focus, .control-panel input[type="date"]:focus {
+  border: 1.5px solid #4f8cff;
+  outline: none;
+}
+
+fieldset.chart-controls {
+  border: 1.5px solid #e3e7ef;
+  border-radius: 12px;
+  margin-top: 18px;
+  margin-bottom: 18px;
+  padding: 18px 24px 12px 24px;
+  background: #fafdff;
+  box-shadow: 0 1px 8px 0 rgba(60, 60, 100, 0.04);
+}
+
+legend {
+  font-size: 1.1em;
+  font-weight: 600;
+  color: #1976d2;
+  margin-bottom: 8px;
+  letter-spacing: 0.01em;
+}
