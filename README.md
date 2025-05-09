@@ -1,3 +1,102 @@
+# Analytics Dashboard 프로젝트
+
+## 프로젝트 개요
+
+**Analytics Dashboard**는 출고/판매 데이터를 기반으로 실시간 현황, 트렌드, 예측, AI 인사이트 분석을 제공하는 통합 대시보드입니다. 구글 시트 데이터를 자동으로 동기화하여, 웹 기반으로 시각화 및 심층 분석을 지원합니다.
+
+---
+
+## 주요 기능
+- **구글 시트 연동**: 출고/판매 데이터를 주기적으로 자동 동기화(증분 upsert)
+- **현황 분석**: 일별/주간/월간 출고량, 판매금액, 품목/분류별 트렌드 시각화
+- **예측 분석**: Prophet 기반 미래 출고량 예측, 신뢰구간 제공
+- **AI 인사이트**: (옵션) LLM 기반 심층 보고서 자동 생성(현재 중지됨)
+- **실시간/요일별 출고 현황**: 당일 및 최근 4주 요일별 시간대별 출고량 분석
+- **Looker Studio 연동**: 외부 BI 리포트 바로가기
+
+---
+
+## 기술 스택
+- **백엔드**: Python, FastAPI, pandas, sqlite3, APScheduler
+- **프론트엔드**: React, TypeScript, Chart.js, axios
+- **AI/예측**: Prophet, scikit-learn, (옵션) Ollama LLM
+- **데이터 소스**: Google Sheets (CSV API)
+
+---
+
+## 폴더 구조
+```
+├── app/                # FastAPI 백엔드 및 데이터 처리
+│   └── main.py         # API, 데이터 동기화, 분석 로직
+├── frontend/           # React 프론트엔드
+│   └── src/            # 주요 컴포넌트, 스타일 등
+├── forecast.py         # 예측 관련 함수
+├── requirements.txt    # Python 의존성
+├── README.md           # 프로젝트 설명 및 안내
+└── ...
+```
+
+---
+
+## 설치 및 실행 방법
+1. **Python 패키지 설치**
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. **프론트엔드 설치/실행**
+   ```bash
+   cd frontend
+   npm install
+   npm run dev
+   ```
+3. **백엔드 실행**
+   ```bash
+   uvicorn app.main:app --reload
+   ```
+4. **웹 브라우저에서 접속**
+   - 기본 주소: http://localhost:3000 (프론트)
+   - API 문서: http://localhost:8000/docs
+
+---
+
+## 데이터 흐름 및 동기화 구조
+- **구글 시트 → CSV 다운로드 → pandas DataFrame → sqlite3 DB upsert**
+- 리프레시 시 변경분만 upsert하여 속도 최적화
+- DB → API → 프론트엔드로 데이터 전달 및 시각화
+
+---
+
+## 주요 특징 및 장점
+- **증분 동기화**: 전체 데이터가 아닌 변경분만 반영하여 빠른 리프레시
+- **모듈화**: 백엔드/프론트엔드 분리, 유지보수 용이
+- **확장성**: AI 분석, 외부 BI 연동 등 기능 확장 가능
+- **실시간성**: 구글 시트 데이터가 변경되면 빠르게 반영
+- **사용자 친화적 UI**: 현대적 대시보드 스타일, 다양한 시각화 제공
+
+---
+
+## 활용 예시
+- 물류/유통/제조사의 출고/판매 실적 모니터링
+- 실시간 트렌드 및 예측 기반 의사결정 지원
+- AI 기반 심층 분석 보고서 자동화(옵션)
+
+---
+
+## 유지보수 및 확장 가이드
+- **구글 시트 구조 변경 시**: app/main.py의 컬럼 매핑/키 조정 필요
+- **AI 분석 재활성화**: /api/insight 엔드포인트 주석 해제 및 LLM 서버 준비
+- **DB 교체**: sqlite3 → MySQL/PostgreSQL 등으로 확장 가능
+- **프론트엔드 커스터마이즈**: src/components 내 컴포넌트 수정
+
+---
+
+## 기여 방법
+1. 이슈 등록 또는 Pull Request 제출
+2. 주요 변경 시 README, 주석, 예제 코드 보강 권장
+3. 문의: comage9@gmail.com
+
+---
+
 # Analytics Dashboard 프로젝트 깃허브 업로드 안내
 
 이 문서는 **다른 컴퓨터에서 이 프로젝트를 깃허브에 업로드(푸시)하는 방법**과 필요한 준비 사항을 안내합니다.
